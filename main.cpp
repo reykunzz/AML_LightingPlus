@@ -181,9 +181,14 @@ static void LoadSettings()
 
 static void ShowLightingMenu(void* data);
 
+static void TestLightingMenuThread(void* data)
+{
+}
+
 static void QueueLightingMenu()
 {
-    // TEMP: menu dinonaktifkan untuk tes stabilitas.
+    if(aml && !aml->PushToJavaUIThread(TestLightingMenuThread, NULL))
+        LOGE("[menu] gagal menjadwalkan tes UI thread");
 }
 
 static void SaveFeatureBool(const char* key, bool value)
