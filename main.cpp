@@ -14,18 +14,31 @@
 #include <time.h>
 #include <stdint.h>
 #include <math.h>
+#include <sys/system_properties.h>
 #include "elfsym.h"
 #include "ilightingplus.h"
+#include "lpdiag.h"
 
-MYMODCFG(net.lightingplus.gtasa, Lighting Plus, 1.0.0, LightingPlus)
+MYMODCFG(net.lightingplus.gtasa, Lighting Plus, 1.0.1, LightingPlus)
 NEEDGAME(com.rockstargames.gtasa)
 
 /* ------------------------------------------------------------------ */
 /*  Log (logcat + /sdcard/Documents/AMLModLogs/net.lightingplus.gtasa/) */
 /* ------------------------------------------------------------------ */
 static FLogger g_flog("lightingplus.log");
-#define LOGI(...) do { logger->Info(__VA_ARGS__);  g_flog.Info(__VA_ARGS__);  } while(0)
-#define LOGE(...) do { logger->Error(__VA_ARGS__); g_flog.Error(__VA_ARGS__); } while(0)
+// Urutan penting: Diag (fd mentah + fsync) dulu, supaya kalau logger/FLogger yang crash, barisnya tetap tercatat.
+#define LOGI(...) do { Diag::Raw(__VA_ARGS__);              logger->Info(__VA_ARGS__);  g_flog.Info(__VA_ARGS__);  } while(0)
+#define LOGE(...) do { Diag::Raw("[ERROR] " __VA_ARGS__);   logger->Error(__VA_ARGS__); g_flog.Error(__VA_ARGS__); } while(0)
+// log ringan hanya ke file diag, maksimal N kali per penghitung (untuk melacak panggilan hook pertama)
+#define DBGN(ctr, ...) do { if((ctr) < 6) { ++(ctr); Diag::Raw(__VA_ARGS__); } } while(0)
+
+// menandai "sedang di kode mana" untuk laporan crash; otomatis kembali ke posisi sebelumnya
+struct WhereScope
+{
+    const char* prev;
+    explicit WhereScope(const char* w) : prev(Diag::g_where) { Diag::g_where = w; }
+    ~WhereScope() { Diag::g_where = prev; }
+};
 
 /* ------------------------------------------------------------------ */
 /*  Tipe & util kecil                                                  */
@@ -56,9 +69,14 @@ struct Settings
 {
     // [General]
     bool  enabled        = true;
-    bool  probeOnly      = false;   // hanya cek simbol & tulis log, tanpa hook
+    bool  probeOnly      = true;    // hanya cek simbol & tulis log, tanpa hook (ubah ke false setelah log aman)
     float forceDarkness  = -1.0f;   // 0..1 untuk tes di siang hari, -1 = pakai jam game
     float interiorScale  = 0.0f;
+    // [Hooks] saklar per-hook, untuk mencari hook penyebab crash
+    bool  hookTimer      = true;
+    bool  hookPed        = true;
+    bool  hookHead       = true;
+    bool  hookTail       = true;
     // [Features]
     bool  pedLighting    = true;
     bool  vehicleLighting= true;
@@ -123,6 +141,11 @@ static void LoadSettings()
     s.forceDarkness   = CfgFloat("General", "ForceDarkness",  s.forceDarkness, -1.0f, 1.0f);
     s.interiorScale   = CfgFloat("General", "InteriorScale",  s.interiorScale, 0.0f, 1.0f);
 
+    s.hookTimer       = CfgBool ("Hooks", "Timer", s.hookTimer);
+    s.hookPed         = CfgBool ("Hooks", "Ped",   s.hookPed);
+    s.hookHead        = CfgBool ("Hooks", "Head",  s.hookHead);
+    s.hookTail        = CfgBool ("Hooks", "Tail",  s.hookTail);
+
     s.pedLighting     = CfgBool ("Features", "PedLighting",     s.pedLighting);
     s.vehicleLighting = CfgBool ("Features", "VehicleLighting", s.vehicleLighting);
     s.dynamicLights   = CfgBool ("Features", "DynamicLights",   s.dynamicLights);
@@ -154,7 +177,8 @@ static void LoadSettings()
 /* ------------------------------------------------------------------ */
 /*  Resolusi simbol / alamat game                                      */
 /* ------------------------------------------------------------------ */
-static uintptr_t g_pGame = 0;
+static uintptr_t g_pGame    = 0;
+static uintptr_t g_gameLen  = 0;
 
 static uintptr_t ParseHex(const char* s)
 {
@@ -167,6 +191,10 @@ static uintptr_t ParseHex(const char* s)
 static uintptr_t Resolve(const char* what, const char* offKey,
                          std::initializer_list<const char*> tokens, bool func)
 {
+    Diag::g_stage = what;
+    Diag::g_where = "resolve";
+    Diag::Raw("[stage] resolve %s", what);
+
     uintptr_t off = 0;
     if(ConfigEntry* e = cfg->Bind(offKey, "0", "Offsets"))
     {
@@ -375,6 +403,7 @@ static void SubmitLight(const CVec3& p, float radius, float r, float g, float b)
 
     if(g_AddLight)
     {
+        WhereScope ws("AddLight");
         CVec3 zero = {0, 0, 0};
         g_AddLight(0 /*PLTYPE_POINTLIGHT*/, p, zero, radius, r, g, b, 0 /*FOGTYPE_NONE*/, false, nullptr);
     }
@@ -429,6 +458,8 @@ static float UpdateBrake(void* veh, const CVec3& pos)
     return t->brake;
 }
 
+static int g_dbgHead = 0, g_dbgTail = 0, g_dbgTimer = 0, g_dbgPed = 0, g_dbgApi = 0;
+
 static inline uintptr_t RegThis(GlossRegisters* r)
 {
 #ifdef AML32
@@ -442,7 +473,10 @@ static inline uintptr_t RegThis(GlossRegisters* r)
 static void OnHeadLight(GlossRegisters* regs, PHookHandle)
 {
     if(!g_set.vehicleLighting) return;
+    WhereScope ws("OnHeadLight");
+    Diag::Tick();
     void* veh = (void*)RegThis(regs);
+    DBGN(g_dbgHead, "[dbg] OnHeadLight veh=%p", veh);
     if(!veh) return;
 
     SyncFrame();
@@ -472,7 +506,9 @@ static void OnHeadLight(GlossRegisters* regs, PHookHandle)
 static void OnTailLight(GlossRegisters* regs, PHookHandle)
 {
     if(!g_set.vehicleLighting) return;
+    WhereScope ws("OnTailLight");
     void* veh = (void*)RegThis(regs);
+    DBGN(g_dbgTail, "[dbg] OnTailLight veh=%p", veh);
     if(!veh) return;
 
     SyncFrame();
@@ -503,6 +539,9 @@ static void OnTailLight(GlossRegisters* regs, PHookHandle)
 
 static void OnTimerUpdate(GlossRegisters*, PHookHandle)
 {
+    WhereScope ws("OnTimerUpdate");
+    Diag::Tick();
+    DBGN(g_dbgTimer, "[dbg] OnTimerUpdate dipanggil");
     g_lastTimerMs = NowMs();
     ResetFrame();
 }
@@ -522,6 +561,9 @@ SDECL_HOOK(uintptr_t, PedSetupLighting, void* self)
 {
     if(!g_set.pedLighting || !g_pAmbPeds) return PedSetupLighting(self);
 
+    WhereScope ws("PedSetupLighting");
+    Diag::Tick();
+    DBGN(g_dbgPed, "[dbg] PedSetupLighting self=%p", self);
     SyncFrame();
     const float dark = GetDarkness();
     const bool  isPlayer = (g_FindPlayerPed != nullptr) && (self == GetPlayerPed());
@@ -551,6 +593,14 @@ SDECL_HOOK(uintptr_t, PedSetupLighting, void* self)
     if(ar < 0.002f && ag < 0.002f && ab < 0.002f) return PedSetupLighting(self);
 
     const RwRGBAReal saved = *g_pAmbPeds;
+    if(!FiniteF(saved.r) || !FiniteF(saved.g) || !FiniteF(saved.b) ||
+       saved.r < -0.01f || saved.r > 8.0f || saved.g < -0.01f || saved.g > 8.0f || saved.b < -0.01f || saved.b > 8.0f)
+    {
+        // alamat Ambient salah / bukan RwRGBAReal -> jangan menulis ke memori game
+        g_set.pedLighting = false;
+        LOGE("[sanity] Ambient ped bernilai aneh (%f %f %f) -> PedLighting dimatikan", saved.r, saved.g, saved.b);
+        return PedSetupLighting(self);
+    }
     g_pAmbPeds->r = BoostChan(saved.r, ar, g_set.ambientCap);
     g_pAmbPeds->g = BoostChan(saved.g, ag, g_set.ambientCap);
     g_pAmbPeds->b = BoostChan(saved.b, ab, g_set.ambientCap);
@@ -565,6 +615,8 @@ SDECL_HOOK(uintptr_t, PedSetupLighting, void* self)
 /* ------------------------------------------------------------------ */
 static void API_AddDynamicLight(float x, float y, float z, float radius, float r, float g, float b)
 {
+    WhereScope ws("API_AddDynamicLight");
+    DBGN(g_dbgApi, "[dbg] API AddDynamicLight (%.1f %.1f %.1f)", x, y, z);
     SyncFrame();
     CVec3 p = { x, y, z };
     float k = DistFade(p);
@@ -576,7 +628,7 @@ static float API_GetDarkness() { return GetDarkness(); }
 static ILightingPlus g_api = { 1, API_AddDynamicLight, API_GetDarkness };
 
 /* ------------------------------------------------------------------ */
-/*  Pasang hook                                                        */
+/*  Pasang hook + sanity check                                         */
 /* ------------------------------------------------------------------ */
 static bool InstallInline(const char* what, uintptr_t addr, HookWithRegistersFn fn)
 {
@@ -586,25 +638,134 @@ static bool InstallInline(const char* what, uintptr_t addr, HookWithRegistersFn 
     return h != nullptr;
 }
 
+// alamat fungsi harus di dalam libGTASA dan executable; kalau tidak, simbol yang cocok kemungkinan salah -> tolak
+static uintptr_t CheckFunc(const char* what, uintptr_t a)
+{
+    if(!a) return 0;
+    const uintptr_t raw = a & ~(uintptr_t)BYBIT(1, 0);      // buang bit Thumb (32-bit)
+    if(g_gameLen && (raw < g_pGame || (raw - g_pGame) >= g_gameLen))
+    {
+        LOGE("[sanity] %s = 0x%lx di luar libGTASA -> ditolak", what, (unsigned long)a);
+        return 0;
+    }
+    if(!aml->HasAddrExecFlag(raw))
+    {
+        LOGE("[sanity] %s = 0x%lx tidak executable -> ditolak", what, (unsigned long)a);
+        return 0;
+    }
+    return a;
+}
+
+// baca nilai data game yang ditemukan; nilai tidak masuk akal = simbol salah -> pointer dibuang
+static void SanityData()
+{
+    Diag::g_where = "sanity";
+    if(g_pHours)
+    {
+        Diag::g_stage = "baca CClock hours";
+        unsigned h = *g_pHours;
+        LOGI("[val] CClock jam = %u", h);
+        if(h > 23) { LOGE("[sanity] jam game tidak masuk akal -> jam dinonaktifkan"); g_pHours = nullptr; g_pMinutes = nullptr; }
+    }
+    if(g_pMinutes)
+    {
+        Diag::g_stage = "baca CClock minutes";
+        unsigned m = *g_pMinutes;
+        LOGI("[val] CClock menit = %u", m);
+        if(m > 59) { LOGE("[sanity] menit game tidak masuk akal -> jam dinonaktifkan"); g_pHours = nullptr; g_pMinutes = nullptr; }
+    }
+    if(g_pFrameCounter)
+    {
+        Diag::g_stage = "baca CTimer frame";
+        LOGI("[val] CTimer frame = %u", *g_pFrameCounter);
+    }
+    if(g_pCurrArea)
+    {
+        Diag::g_stage = "baca CGame currArea";
+        unsigned a = *g_pCurrArea;
+        LOGI("[val] currArea = %u", a);
+        if(a > 40) { LOGE("[sanity] currArea tidak masuk akal -> diabaikan"); g_pCurrArea = nullptr; }
+    }
+    if(g_pNumLights)
+    {
+        Diag::g_stage = "baca NumLights";
+        unsigned n = *g_pNumLights;
+        LOGI("[val] NumLights = %u", n);
+        if(n > 64) { LOGE("[sanity] NumLights tidak masuk akal -> diabaikan"); g_pNumLights = nullptr; }
+    }
+    if(g_pAmbPeds)
+    {
+        Diag::g_stage = "baca Ambient ped";
+        const RwRGBAReal a = *g_pAmbPeds;
+        LOGI("[val] Ambient ped = %f %f %f %f", a.r, a.g, a.b, a.a);
+        if(!FiniteF(a.r) || !FiniteF(a.g) || !FiniteF(a.b) ||
+           a.r < -0.01f || a.r > 8.0f || a.g < -0.01f || a.g > 8.0f || a.b < -0.01f || a.b > 8.0f)
+        {
+            LOGE("[sanity] Ambient ped bernilai aneh -> PedLighting dinonaktifkan (kemungkinan simbol salah)");
+            g_pAmbPeds = nullptr;
+        }
+    }
+    Diag::g_where = "idle";
+}
+
+static void LogEnvironment()
+{
+    char sdk[PROP_VALUE_MAX] = {0}, model[PROP_VALUE_MAX] = {0}, rel[PROP_VALUE_MAX] = {0}, abi[PROP_VALUE_MAX] = {0};
+    __system_property_get("ro.build.version.sdk", sdk);
+    __system_property_get("ro.product.model", model);
+    __system_property_get("ro.build.version.release", rel);
+    __system_property_get("ro.product.cpu.abi", abi);
+    LOGI("[env] Android %s (SDK %s), %s, ABI %s, mod %s", rel, sdk, model, abi, BYBIT("32-bit", "64-bit"));
+    const char* pkg = aml->GetCurrentGame();
+    LOGI("[env] game=%s", pkg ? pkg : "?");
+}
+
+struct LoadScope { ~LoadScope() { Diag::g_where = "idle"; } };
+
 ON_MOD_PRELOAD()
 {
     logger->SetTag("LightingPlus");
+    // buka log secepat mungkin supaya crash di tahap mana pun tetap meninggalkan jejak
+    Diag::Init(aml->GetAndroidDataPath(), aml->GetConfigPath(), aml->GetCurrentGame());
+    Diag::Stage("preload");
+    Diag::g_where = "idle";
 }
 
 ON_MOD_LOAD()
 {
+    LoadScope _ls;
     logger->SetTag("LightingPlus");
-    LOGI("LightingPlus 1.0.0 (%s) dimuat", BYBIT("32-bit", "64-bit"));
+    const bool diagOk = Diag::Init(aml->GetAndroidDataPath(), aml->GetConfigPath(), aml->GetCurrentGame());
+    Diag::Stage("load:start");
+    LOGI("LightingPlus 1.0.1 (%s) dimuat", BYBIT("32-bit", "64-bit"));
+    if(!diagOk) LOGE("[diag] folder log di AndroidDataPath tidak bisa dibuat -> crash-guard tidak aktif");
+    LogEnvironment();
 
+    Diag::Guard guard;
+    Diag::LoadGuard(guard);
+    if(guard.timer || guard.ped || guard.head || guard.tail || guard.addlight || guard.safe)
+        LOGI("[guard] dimatikan otomatis: timer=%d ped=%d head=%d tail=%d addlight=%d safe=%d  (reset: hapus guard.txt / `lp reset`)",
+             guard.timer, guard.ped, guard.head, guard.tail, guard.addlight, guard.safe);
+
+    Diag::Stage("load:GetLib");
     g_pGame = aml->GetLib("libGTASA.so");
     if(!g_pGame) { LOGE("libGTASA.so tidak ditemukan, plugin berhenti"); return; }
+    g_gameLen = aml->GetLibLength("libGTASA.so");
+    LOGI("[env] libGTASA base=0x%lx panjang=0x%lx", (unsigned long)g_pGame, (unsigned long)g_gameLen);
 
+    Diag::Stage("load:config");
     LoadSettings();
     cfg->Save();
+    LOGI("[cfg] Enabled=%d ProbeOnly=%d  Hooks: Timer=%d Ped=%d Head=%d Tail=%d  Features: Ped=%d Vehicle=%d Dynamic=%d",
+         g_set.enabled, g_set.probeOnly, g_set.hookTimer, g_set.hookPed, g_set.hookHead, g_set.hookTail,
+         g_set.pedLighting, g_set.vehicleLighting, g_set.dynamicLights);
     if(!g_set.enabled) { LOGI("Enabled=false -> plugin tidak aktif"); return; }
 
+    Diag::Stage("load:ElfSym::Init");
     if(!ElfSym::Init("libGTASA.so"))
         LOGI("[warn] .dynsym libGTASA.so tidak bisa dibaca; hanya [Offsets] manual yang bisa dipakai");
+    else
+        LOGI("[sym] .dynsym terbaca: %lu simbol", (unsigned long)ElfSym::g_tab.count);
 
     /* ---- data game ---- */
     g_pHours        = (unsigned char*)Resolve("CClock hours",   "CClock_Hours",   { "6CClock", "ms_nGameClockHours"   }, false);
@@ -614,12 +775,18 @@ ON_MOD_LOAD()
     g_pNumLights    = (unsigned int*) Resolve("NumLights",      "NumLights",      { "12CPointLights", "9NumLights"    }, false);
     g_pAmbPeds      = (RwRGBAReal*)   Resolve("Ambient (ped)",  "AmbientPeds",    { "AmbientLightColourForFrame_PedsCarsAndObjects" }, false);
 
+    Diag::Stage("load:sanity-data");
+    SanityData();
+
     /* ---- fungsi game ---- */
-    g_FindPlayerPed = (FindPlayerPed_t)Resolve("FindPlayerPed", "FindPlayerPed", { "_Z13FindPlayerPedi" }, true);
+    g_FindPlayerPed = (FindPlayerPed_t)CheckFunc("FindPlayerPed",
+                      Resolve("FindPlayerPed", "FindPlayerPed", { "_Z13FindPlayerPedi" }, true));
 
     char addName[200] = {0};
     uintptr_t addAddr = 0;
     {
+        Diag::g_stage = "resolve AddLight";
+        Diag::g_where = "resolve";
         size_t n = 0;
         uintptr_t off = 0;
         if(ConfigEntry* e = cfg->Bind("CPointLights_AddLight", "0", "Offsets")) { off = ParseHex(e->GetString()); delete e; }
@@ -641,10 +808,14 @@ ON_MOD_LOAD()
             else LOGI("[sym] %-22s = TIDAK DITEMUKAN", "AddLight");
         }
     }
+    addAddr = CheckFunc("AddLight", addAddr);
+    if(guard.addlight && addAddr) { LOGI("[guard] AddLight dimatikan oleh crash-guard"); addAddr = 0; }
     g_AddLight = (AddLight_t)addAddr;
 
-    uintptr_t aPedLight = Resolve("CPed::SetupLighting", "CPed_SetupLighting", { "_ZN5CPed13SetupLighting" }, true);
-    uintptr_t aTimer    = Resolve("CTimer::Update",      "CTimer_Update",      { "_ZN6CTimer6UpdateE" },     true);
+    uintptr_t aPedLight = CheckFunc("CPed::SetupLighting",
+                          Resolve("CPed::SetupLighting", "CPed_SetupLighting", { "_ZN5CPed13SetupLighting" }, true));
+    uintptr_t aTimer    = CheckFunc("CTimer::Update",
+                          Resolve("CTimer::Update",      "CTimer_Update",      { "_ZN6CTimer6UpdateE" },     true));
     uintptr_t aHead = 0;
     switch(g_set.headTrigger)
     {
@@ -652,20 +823,60 @@ ON_MOD_LOAD()
         case 2:  aHead = Resolve("Head trigger (prerender)","CVehicle_PreRender",        { "_ZN8CVehicle9PreRender" },         true); break;
         default: aHead = Resolve("Head trigger (beam)",    "CVehicle_DoHeadLightBeam",   { "_ZN8CVehicle15DoHeadLightBeam" },  true); break;
     }
-    uintptr_t aTail = Resolve("CVehicle::DoTailLight", "CVehicle_DoTailLightEffect", { "_ZN8CVehicle17DoTailLightEffect" }, true);
+    aHead = CheckFunc("Head trigger", aHead);
+    uintptr_t aTail = CheckFunc("CVehicle::DoTailLight",
+                      Resolve("CVehicle::DoTailLight", "CVehicle_DoTailLightEffect", { "_ZN8CVehicle17DoTailLightEffect" }, true));
+    Diag::g_where = "idle";
 
     /* ---- ringkasan kemampuan ---- */
+    Diag::Stage("load:ringkasan");
     LOGI("[ringkas] ped lighting     : %s", (g_pAmbPeds && aPedLight) ? "SIAP" : "TIDAK SIAP (butuh Ambient + CPed::SetupLighting)");
     LOGI("[ringkas] vehicle lighting : %s", (aHead ? (g_AddLight ? "SIAP" : "SIAP tanpa AddLight (hanya memengaruhi ped)") : "TIDAK SIAP (butuh trigger lampu depan)"));
     LOGI("[ringkas] jam game         : %s", g_pHours ? "ada" : "tidak ada");
 
-    if(g_set.probeOnly) { LOGI("ProbeOnly=true -> hook tidak dipasang. Cek log lalu set ProbeOnly=false"); return; }
+    if(g_set.probeOnly)
+    {
+        LOGI("ProbeOnly=true -> hook tidak dipasang. Cek log lalu set ProbeOnly=false (Termux: lp full)");
+        return;
+    }
+    if(guard.safe)
+    {
+        LOGI("[guard] SAFE MODE: run sebelumnya berkali-kali tidak stabil -> hook tidak dipasang. Reset: `lp reset`");
+        return;
+    }
+
+    const bool doTimer = g_set.hookTimer && !guard.timer && aTimer;
+    const bool doPed   = g_set.hookPed   && !guard.ped   && g_pAmbPeds && aPedLight;
+    const bool doHead  = g_set.hookHead  && !guard.head  && aHead;
+    const bool doTail  = g_set.hookTail  && !guard.tail  && aTail && doHead;
+    LOGI("[rencana] hook: Timer=%d Ped=%d Head=%d Tail=%d", doTimer, doPed, doHead, doTail);
+
+    if(doTimer || doPed || doHead)
+    {
+        // hitung run berturut-turut yang tidak pernah stabil; >=2 -> safe mode (sticky sampai reset)
+        int bad = Diag::ReadRun();
+        if(bad >= 2)
+        {
+            Diag::AppendFile(Diag::g_pGuard, "safe=1\n");
+            LOGE("[guard] %d run berturut-turut tidak stabil -> SAFE MODE, hook tidak dipasang. Kirim crash.txt & log, lalu `lp reset`", bad);
+            return;
+        }
+        Diag::WriteRun(bad + 1);
+    }
 
     /* ---- hook ---- */
-    if(aTimer) g_timerHooked = InstallInline("CTimer::Update", aTimer, OnTimerUpdate);
-
-    if(g_pAmbPeds && aPedLight)
+    if(doTimer)
     {
+        Diag::Stage("install:Timer");
+        Diag::TryBegin("timer");
+        g_timerHooked = InstallInline("CTimer::Update", aTimer, OnTimerUpdate);
+        Diag::TryEnd();
+    }
+
+    if(doPed)
+    {
+        Diag::Stage("install:PedHook");
+        Diag::TryBegin("ped");
         if(aml->Hook((void*)aPedLight, (void*)&HookOf_PedSetupLighting, (void**)&PedSetupLighting))
             LOGI("[hook] %-22s : OK", "CPed::SetupLighting");
         else
@@ -673,17 +884,44 @@ ON_MOD_LOAD()
             LOGE("[hook] CPed::SetupLighting : GAGAL");
             g_set.pedLighting = false;
         }
+        Diag::TryEnd();
     }
     else g_set.pedLighting = false;
 
-    if(aHead)
+    if(doHead)
     {
+        Diag::Stage("install:Head");
+        Diag::TryBegin("head");
         bool ok = InstallInline("Head light", aHead, OnHeadLight);
-        if(ok && aTail) InstallInline("Tail light", aTail, OnTailLight);
+        Diag::TryEnd();
+        if(ok && doTail)
+        {
+            Diag::Stage("install:Tail");
+            Diag::TryBegin("tail");
+            InstallInline("Tail light", aTail, OnTailLight);
+            Diag::TryEnd();
+        }
         if(!ok) g_set.vehicleLighting = false;
     }
     else g_set.vehicleLighting = false;
 
+    Diag::Stage("load:RegisterInterface");
     RegisterInterface("ILightingPlus", &g_api);
     LOGI("Selesai. PedLighting=%d VehicleLighting=%d DynamicLights=%d", g_set.pedLighting, g_set.vehicleLighting, g_set.dynamicLights);
+    Diag::Stage("load:selesai");
+}
+
+// dipanggil AML saat game crash (tidak dijamin) -> tulis crash.txt + hook tersangka masuk guard.txt
+ON_GAME_CRASH()
+{
+    uintptr_t pc = 0, lr = 0, sp = 0;
+    if(mcontext)
+    {
+#ifdef AML32
+        pc = (uintptr_t)mcontext->arm_pc; lr = (uintptr_t)mcontext->arm_lr; sp = (uintptr_t)mcontext->arm_sp;
+#else
+        pc = (uintptr_t)mcontext->pc;     lr = (uintptr_t)mcontext->regs[30]; sp = (uintptr_t)mcontext->sp;
+#endif
+    }
+    Diag::CrashDump(library, sig, code, libaddr, pc, lr, sp, g_pGame);
 }

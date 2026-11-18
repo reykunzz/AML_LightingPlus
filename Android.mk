@@ -15,6 +15,6 @@ LOCAL_SRC_FILES := main.cpp mod/logger.cpp mod/config.cpp mod/flogger.cpp
 LOCAL_CFLAGS += -O2 -DNDEBUG
 LOCAL_CPPFLAGS += -std=c++17
 LOCAL_C_INCLUDES += $(LOCAL_PATH) $(LOCAL_PATH)/mod
-LOCAL_LDLIBS += -llog
+LOCAL_LDLIBS += -llog -ldl
 
 include $(BUILD_SHARED_LIBRARY)

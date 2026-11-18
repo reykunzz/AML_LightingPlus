@@ -22,6 +22,7 @@ private:
     FILE* m_pFile;
     char m_szFileName[128];
     bool m_bClearOnOpen;
+    bool m_bGaveUp;   // jalur MediaStore hanya dicoba sekali (hindari JNI + entri duplikat tiap baris log)
 };
 
 #endif // _FLOGGER_H

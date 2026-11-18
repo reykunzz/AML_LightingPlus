@@ -43,22 +43,66 @@ Game 32-bit memakai `libLightingPlus.so`, game 64-bit memakai `libLightingPlus64
 
 ## 4. Run pertama (penting)
 
-1. Set `ProbeOnly=true` di config, jalankan game sekali.
-2. Buka log: `/sdcard/Documents/AMLModLogs/net.lightingplus.gtasa/lightingplus.log`
+Sejak v1.0.1 `ProbeOnly` **default true**: run pertama hanya mengecek simbol dan menulis log, tanpa memasang hook.
+
+1. Jalankan game sekali (ProbeOnly sudah true).
+2. Buka log (di Termux: `./lp.sh log`). Lokasi file:
+   - `/sdcard/Android/data/com.rockstargames.gtasa/files/LightingPlus/lightingplus.log` (utama, selalu ditulis)
+   - `/sdcard/Documents/AMLModLogs/net.lightingplus.gtasa/lightingplus.log` (salinan)
 3. Cari baris `[ringkas]`:
-   - `ped lighting : SIAP`, `vehicle lighting : SIAP` → set `ProbeOnly=false`.
+   - `ped lighting : SIAP`, `vehicle lighting : SIAP` → `./lp.sh full` (ProbeOnly=false).
    - `TIDAK SIAP` → lihat baris `[sym]` di atasnya, simbol mana yang tidak ketemu.
 4. Untuk tes di siang hari: `ForceDarkness=1.0`.
 
 Kalau ada simbol tidak ketemu, kirim isi log-nya. Alamat juga bisa diisi manual di `[Offsets]`
 (hex, relatif ke base `libGTASA.so`; untuk fungsi Thumb 32-bit tambahkan `+1`).
 
+## 4b. Kalau game force close (cara melacak)
+
+Folder log: `/sdcard/Android/data/com.rockstargames.gtasa/files/LightingPlus/`
+
+| File | Isi |
+|---|---|
+| `lightingplus.log` | log run terakhir, ditulis + fsync per baris. **Baris terakhir = tempat berhenti.** `[stage]` = tahap load, `[dbg]` = panggilan hook pertama |
+| `lightingplus.prev.log` | log run sebelumnya |
+| `crash.txt` | laporan crash dari AML: sinyal, alamat `pc`/`lr` (offset di libGTASA dan di LightingPlus), hook tersangka |
+| `guard.txt` | hook yang **dimatikan otomatis** karena tersangka crash / mati saat dipasang |
+| `where.txt` | lokasi folder log dan file config |
+
+Crash-guard: hook yang jadi tersangka crash otomatis dimatikan di run berikutnya. Kalau 2 run berturut-turut tidak stabil
+(game ditutup/crash sebelum 20 detik), mod masuk SAFE MODE (hook tidak dipasang) sampai `./lp.sh reset`.
+
+Sanity check baru: alamat fungsi harus di dalam libGTASA dan executable; nilai data (jam, NumLights, ambient ped)
+dibaca dan dicek masuk akal. Kalau tidak, simbolnya dianggap salah dan fitur terkait dimatikan, bukan di-hook.
+
+### Termux (`lp.sh`)
+
+```bash
+termux-setup-storage              # sekali saja
+cd AML_LightingPlus && chmod +x lp.sh
+./lp.sh log                       # 80 baris terakhir log
+./lp.sh crash                     # crash.txt + guard.txt
+./lp.sh report                    # kumpulkan semua ke /sdcard/Download/LightingPlus_report.txt
+./lp.sh set Vehicle HeadIntensity 0.4
+./lp.sh hook head off             # matikan satu hook (timer|ped|head|tail)
+./lp.sh probe | full | on | off
+./lp.sh reset                     # hapus guard/crash/penghitung
+```
+
+Mencari hook penyebab (tutup game total tiap langkah, jalankan, lalu `./lp.sh log` dan `./lp.sh crash`):
+`./lp.sh step 1` (tanpa hook) → `step 2` (Timer) → `step 3` (Timer+Ped) → `step 4` (Timer+Head) → `step 5` (semua).
+Langkah pertama yang crash menunjuk hook penyebab.
+
+Android 11+: Termux tidak bisa membuka `/sdcard/Android/data`. Buka folder log lewat file manager, atau pakai salinan di
+`/sdcard/Documents/AMLModLogs/...` (bisa dibaca Termux). Config juga harus diedit lewat file manager di sana.
+
 ## 5. Konfigurasi (file ini dibuat otomatis oleh AML)
 
 | Section | Key | Default | Keterangan |
 |---|---|---|---|
 | General | Enabled | true | Matikan semua |
-| General | ProbeOnly | false | Hanya cek simbol, tanpa hook |
+| General | ProbeOnly | true | Hanya cek simbol, tanpa hook (set false setelah log aman) |
+| Hooks | Timer / Ped / Head / Tail | true | Saklar per-hook untuk mencari penyebab crash |
 | General | ForceDarkness | -1 | 0..1 paksa tingkat gelap, -1 = ikut jam game |
 | General | InteriorScale | 0.0 | Pengali efek malam di dalam interior |
 | Features | PedLighting / VehicleLighting / DynamicLights | true | Saklar fitur |

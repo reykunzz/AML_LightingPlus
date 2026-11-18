@@ -24,9 +24,9 @@ pkg install -y clang >/dev/null 2>&1 || true
 SRC="main.cpp mod/logger.cpp mod/config.cpp mod/flogger.cpp"
 FLAGS="-shared -fPIC -O2 -DNDEBUG -std=c++17 -I. -Imod"
 
-if clang++ $FLAGS $SRC -llog -static-libstdc++ -o out/libLightingPlus64.so 2>/tmp/lp_err.txt; then
+if clang++ $FLAGS $SRC -llog -ldl -static-libstdc++ -o out/libLightingPlus64.so 2>/tmp/lp_err.txt; then
     echo "[OK] out/libLightingPlus64.so (static libc++)"
-elif clang++ $FLAGS $SRC -llog -o out/libLightingPlus64.so; then
+elif clang++ $FLAGS $SRC -llog -ldl -o out/libLightingPlus64.so; then
     echo "[OK] out/libLightingPlus64.so (memakai libc++_shared bawaan Termux)"
     echo "[!] Library ini bisa butuh libc++_shared.so di HP/game. Untuk hasil paling aman pakai build GitHub Actions."
 else

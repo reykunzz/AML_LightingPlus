@@ -6,7 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-FLogger::FLogger(const char* szFileName, bool bClearFile) : m_pFile(NULL), m_bClearOnOpen(bClearFile)
+FLogger::FLogger(const char* szFileName, bool bClearFile) : m_pFile(NULL), m_bClearOnOpen(bClearFile), m_bGaveUp(false)
 {
     m_szFileName[0] = 0;
     if(szFileName && szFileName[0] != 0)
@@ -151,6 +151,7 @@ bool FLogger::OpenViaMediaStore()
 bool FLogger::Open()
 {
     if(m_pFile) return true;
+    if(m_bGaveUp) return false;
     if(!aml || !modinfo || m_szFileName[0] == 0) return false;
 
     const char* root = aml->GetInternalPath();
@@ -183,7 +184,9 @@ bool FLogger::Open()
             return true;
         }
     }
-    return OpenViaMediaStore();
+    bool ok = OpenViaMediaStore();
+    if(!ok) m_bGaveUp = true;
+    return ok;
 }
 
 void FLogger::WriteLine(const char* szPrefix, const char* szMessage, va_list args)
