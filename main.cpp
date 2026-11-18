@@ -187,7 +187,8 @@ static void TestLightingMenuThread(void* data)
 
 static void QueueLightingMenu()
 {
-    // TEMP: dialog dinonaktifkan untuk investigasi crash.
+    if(aml && !aml->PushToJavaUIThread(ShowLightingMenu, NULL))
+        LOGE("[menu] gagal menjadwalkan dialog AML");
 }
 
 static void SaveFeatureBool(const char* key, bool value)
@@ -237,14 +238,14 @@ static void OnLightingMenuChoice(int index, void* data)
             return;
     }
 
-    ShowLightingMenu(NULL);
+    QueueLightingMenu();
 }
 
 static void ShowLightingMenu(void* data)
 {
     if(!aml) return;
 
-    const char* items[] = {
+    static const char* items[] = {
         "Toggle Ped Lighting",
         "Toggle Vehicle Lighting",
         "Toggle Dynamic Lights",
