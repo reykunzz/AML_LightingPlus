@@ -174,6 +174,89 @@ static void LoadSettings()
     if(s.maxDistance <= s.fadeNear) s.maxDistance = s.fadeNear + 1.0f;
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  LightingPlus AML Settings Menu                                     */
+/* ------------------------------------------------------------------ */
+
+static void ShowLightingMenu(void* data);
+
+static void QueueLightingMenu()
+{
+    if(aml && !aml->PushToJavaUIThread(ShowLightingMenu, NULL))
+        LOGE("[menu] gagal menjadwalkan dialog AML");
+}
+
+static void SaveFeatureBool(const char* key, bool value)
+{
+    ConfigEntry* e = cfg->Bind(key, value, "Features");
+    if(e)
+    {
+        e->SetBool(value);
+        delete e;
+    }
+    cfg->Save();
+}
+
+static void OnLightingMenuChoice(int index, void* data)
+{
+    if(index < 0) return;
+
+    switch(index)
+    {
+        case 0:
+            g_set.pedLighting = !g_set.pedLighting;
+            SaveFeatureBool("PedLighting", g_set.pedLighting);
+            aml->ShowToast(false, "Ped Lighting: %s",
+                g_set.pedLighting ? "ON" : "OFF");
+            break;
+
+        case 1:
+            g_set.vehicleLighting = !g_set.vehicleLighting;
+            SaveFeatureBool("VehicleLighting", g_set.vehicleLighting);
+            aml->ShowToast(false, "Vehicle Lighting: %s",
+                g_set.vehicleLighting ? "ON" : "OFF");
+            break;
+
+        case 2:
+            g_set.dynamicLights = !g_set.dynamicLights;
+            SaveFeatureBool("DynamicLights", g_set.dynamicLights);
+            aml->ShowToast(false, "Dynamic Lights: %s",
+                g_set.dynamicLights ? "ON" : "OFF");
+            break;
+
+        case 3:
+            cfg->Save();
+            aml->ShowToast(false, "LightingPlus settings saved");
+            break;
+
+        case 4:
+            return;
+    }
+
+    ShowLightingMenu(NULL);
+}
+
+static void ShowLightingMenu(void* data)
+{
+    if(!aml) return;
+
+    const char* items[] = {
+        "Toggle Ped Lighting",
+        "Toggle Vehicle Lighting",
+        "Toggle Dynamic Lights",
+        "Save Settings",
+        "Close"
+    };
+
+    aml->ShowChoiceDialog(
+        "Lighting Plus Settings",
+        items,
+        5,
+        OnLightingMenuChoice
+    );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Resolusi simbol / alamat game                                      */
 /* ------------------------------------------------------------------ */
@@ -800,10 +883,16 @@ ON_MOD_LOAD()
     Diag::Stage("load:config");
     LoadSettings();
     cfg->Save();
+
     LOGI("[cfg] Enabled=%d ProbeOnly=%d  Hooks: Timer=%d Ped=%d Head=%d Tail=%d  Features: Ped=%d Vehicle=%d Dynamic=%d",
          g_set.enabled, g_set.probeOnly, g_set.hookTimer, g_set.hookPed, g_set.hookHead, g_set.hookTail,
          g_set.pedLighting, g_set.vehicleLighting, g_set.dynamicLights);
-    if(!g_set.enabled) { LOGI("Enabled=false -> plugin tidak aktif"); return; }
+    if(!g_set.enabled)
+    {
+        LOGI("Enabled=false -> plugin tidak aktif");
+        QueueLightingMenu();
+        return;
+    }
 
     Diag::Stage("load:ElfSym::Init");
     if(!ElfSym::Init("libGTASA.so"))
@@ -893,11 +982,13 @@ ON_MOD_LOAD()
     if(g_set.probeOnly)
     {
         LOGI("ProbeOnly=true -> hook tidak dipasang. Cek log lalu set ProbeOnly=false (Termux: lp full)");
+        QueueLightingMenu();
         return;
     }
     if(guard.safe)
     {
         LOGI("[guard] SAFE MODE: run sebelumnya berkali-kali tidak stabil -> hook tidak dipasang. Reset: `lp reset`");
+        QueueLightingMenu();
         return;
     }
 
@@ -915,6 +1006,7 @@ ON_MOD_LOAD()
         {
             Diag::AppendFile(Diag::g_pGuard, "safe=1\n");
             LOGE("[guard] %d run berturut-turut tidak stabil -> SAFE MODE, hook tidak dipasang. Kirim crash.txt & log, lalu `lp reset`", bad);
+            QueueLightingMenu();
             return;
         }
         Diag::WriteRun(bad + 1);
@@ -967,6 +1059,7 @@ ON_MOD_LOAD()
     RegisterInterface("ILightingPlus", &g_api);
     LOGI("Selesai. PedLighting=%d VehicleLighting=%d DynamicLights=%d", g_set.pedLighting, g_set.vehicleLighting, g_set.dynamicLights);
     Diag::Stage("load:selesai");
+    QueueLightingMenu();
 }
 
 // dipanggil AML saat game crash (tidak dijamin) -> tulis crash.txt + hook tersangka masuk guard.txt
