@@ -187,8 +187,7 @@ static void TestLightingMenuThread(void* data)
 
 static void QueueLightingMenu()
 {
-    if(aml && !aml->PushToJavaUIThread(ShowLightingMenu, NULL))
-        LOGE("[menu] gagal menjadwalkan dialog AML");
+    // Dialog dinonaktifkan sementara untuk tes lifecycle.
 }
 
 static void SaveFeatureBool(const char* key, bool value)
@@ -862,12 +861,36 @@ ON_MOD_PRELOAD()
     Diag::g_where = "idle";
 }
 
+static void OnLightingLifecycle(int event, void* data)
+{
+    switch(event)
+    {
+        case LIFECYCLE_PAUSE:
+            LOGI("[lifecycle-test] PAUSE");
+            break;
+        case LIFECYCLE_RESUME:
+            LOGI("[lifecycle-test] RESUME");
+            break;
+        case LIFECYCLE_FOCUS_LOST:
+            LOGI("[lifecycle-test] FOCUS_LOST");
+            break;
+        case LIFECYCLE_FOCUS_GAINED:
+            LOGI("[lifecycle-test] FOCUS_GAINED");
+            break;
+        default:
+            LOGI("[lifecycle-test] event tidak dikenal: %d", event);
+            break;
+    }
+}
+
 ON_MOD_LOAD()
 {
     LoadScope _ls;
     logger->SetTag("LightingPlus");
     const bool diagOk = Diag::Init(aml->GetAndroidDataPath(), aml->GetConfigPath(), aml->GetCurrentGame());
     Diag::Stage("load:start");
+    aml->AddLifecycleListener(OnLightingLifecycle, NULL);
+    LOGI("[lifecycle-test] listener berhasil didaftarkan");
     LOGI("LightingPlus 1.0.3 (%s) dimuat", BYBIT("32-bit", "64-bit"));
     if(!diagOk) LOGE("[diag] folder log di AndroidDataPath tidak bisa dibuat -> crash-guard tidak aktif");
     LogEnvironment();
