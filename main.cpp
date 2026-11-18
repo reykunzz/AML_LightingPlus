@@ -19,7 +19,7 @@
 #include "ilightingplus.h"
 #include "lpdiag.h"
 
-MYMODCFG(net.lightingplus.gtasa, Lighting Plus, 1.0.2, LightingPlus)
+MYMODCFG(net.lightingplus.gtasa, Lighting Plus, 1.0.3, LightingPlus)
 NEEDGAME(com.rockstargames.gtasa)
 
 /* ------------------------------------------------------------------ */
@@ -394,12 +394,38 @@ static float DistFade(const CVec3& p)
 /* ------------------------------------------------------------------ */
 /*  Kirim cahaya ke game (dengan budget)                               */
 /* ------------------------------------------------------------------ */
+struct Stats
+{
+    unsigned headCalls, tailCalls, pedCalls;
+    unsigned skipDark, skipMaxVeh, skipTransform, skipFade, skipNotHead;
+    unsigned subOk, subDim, subBudget, subGameFull, subNoAdd;
+    float    lastDark;
+};
+static Stats g_st;
+static int   g_statLines = 0;
+static uint32_t g_lastStatMs = 0;
+
+static void StatTick()
+{
+    const uint32_t now = NowMs();
+    if(g_statLines >= 24 || (now - g_lastStatMs) < 5000u) return;
+    g_lastStatMs = now;
+    ++g_statLines;
+    unsigned h = g_pHours ? *g_pHours : 99, m = g_pMinutes ? *g_pMinutes : 99;
+    unsigned nl = g_pNumLights ? *g_pNumLights : 0;
+    Diag::Raw("[stat] jam=%02u:%02u dark=%.2f NumLights=%u | panggil head=%u tail=%u ped=%u | lewati: gelap=%u maxveh=%u transform=%u fade=%u bukanhead=%u | kirim: ok=%u redup=%u budget=%u gamepenuh=%u tanpaAdd=%u",
+              h, m, g_st.lastDark, nl, g_st.headCalls, g_st.tailCalls, g_st.pedCalls,
+              g_st.skipDark, g_st.skipMaxVeh, g_st.skipTransform, g_st.skipFade, g_st.skipNotHead,
+              g_st.subOk, g_st.subDim, g_st.subBudget, g_st.subGameFull, g_st.subNoAdd);
+}
+
 static void SubmitLight(const CVec3& p, float radius, float r, float g, float b)
 {
     if(!g_set.dynamicLights) return;
-    if((r + g + b) < g_set.minIntensity) return;     // terlalu redup -> buang
-    if(g_nSubmitted >= g_set.maxLights) return;      // jatah plugin habis
-    if(g_pNumLights && *g_pNumLights >= (unsigned)g_set.maxTotalLights) return; // sisakan slot untuk game
+    if((r + g + b) < g_set.minIntensity) { ++g_st.subDim; return; }     // terlalu redup -> buang
+    if(g_nSubmitted >= g_set.maxLights) { ++g_st.subBudget; return; }   // jatah plugin habis
+    if(g_pNumLights && *g_pNumLights >= (unsigned)g_set.maxTotalLights) { ++g_st.subGameFull; return; } // sisakan slot untuk game
+    if(!g_AddLight) ++g_st.subNoAdd; else ++g_st.subOk;
 
     if(g_AddLight)
     {
@@ -482,15 +508,18 @@ static void HeadLogic(void* veh)
     if(SeenIn(g_headCur, g_headCurN, veh)) return;   // 1 kendaraan = 1x per frame
     if(g_headCurN < MAX_SEEN) g_headCur[g_headCurN++] = veh;
 
+    ++g_st.headCalls;
+    StatTick();
     const float dark = GetDarkness();
-    if(dark < 0.04f) return;
-    if(g_nHeadVeh >= g_set.maxVehicles) return;
+    g_st.lastDark = dark;
+    if(dark < 0.04f) { ++g_st.skipDark; return; }
+    if(g_nHeadVeh >= g_set.maxVehicles) { ++g_st.skipMaxVeh; return; }
 
     CVec3 pos, fwd;
-    if(!EntityTransform(veh, &pos, &fwd)) return;
+    if(!EntityTransform(veh, &pos, &fwd)) { ++g_st.skipTransform; return; }
 
     const float k = dark * DistFade(pos);
-    if(k <= 0.0f) return;
+    if(k <= 0.0f) { ++g_st.skipFade; return; }
     ++g_nHeadVeh;
 
     // satu "kolam" cahaya di depan kendaraan, sedikit di bawah pusat (jatuh ke jalan)
@@ -513,15 +542,16 @@ static void TailLogic(void* veh)
     if(SeenIn(g_tailDone, g_tailDoneN, veh)) return;
     if(g_tailDoneN < MAX_SEEN) g_tailDone[g_tailDoneN++] = veh;
 
+    ++g_st.tailCalls;
     // hanya kendaraan yang lampu depannya menyala (frame ini atau sebelumnya)
-    if(!SeenIn(g_headCur, g_headCurN, veh) && !SeenIn(g_headPrev, g_headPrevN, veh)) return;
+    if(!SeenIn(g_headCur, g_headCurN, veh) && !SeenIn(g_headPrev, g_headPrevN, veh)) { ++g_st.skipNotHead; return; }
 
     const float dark = GetDarkness();
     if(dark < 0.04f) return;
     if(g_nTailVeh >= g_set.maxVehicles) return;
 
     CVec3 pos, fwd;
-    if(!EntityTransform(veh, &pos, &fwd)) return;
+    if(!EntityTransform(veh, &pos, &fwd)) { ++g_st.skipTransform; return; }
 
     const float k = dark * DistFade(pos);
     if(k <= 0.0f) return;
@@ -576,6 +606,8 @@ SDECL_HOOK(uintptr_t, PedSetupLighting, void* self)
     WhereScope ws("PedSetupLighting");
     Diag::Tick();
     DBGN(g_dbgPed, "[dbg] PedSetupLighting self=%p", self);
+    ++g_st.pedCalls;
+    StatTick();
     SyncFrame();
     const float dark = GetDarkness();
     const bool  isPlayer = (g_FindPlayerPed != nullptr) && (self == GetPlayerPed());
@@ -749,7 +781,7 @@ ON_MOD_LOAD()
     logger->SetTag("LightingPlus");
     const bool diagOk = Diag::Init(aml->GetAndroidDataPath(), aml->GetConfigPath(), aml->GetCurrentGame());
     Diag::Stage("load:start");
-    LOGI("LightingPlus 1.0.2 (%s) dimuat", BYBIT("32-bit", "64-bit"));
+    LOGI("LightingPlus 1.0.3 (%s) dimuat", BYBIT("32-bit", "64-bit"));
     if(!diagOk) LOGE("[diag] folder log di AndroidDataPath tidak bisa dibuat -> crash-guard tidak aktif");
     LogEnvironment();
 
@@ -825,7 +857,7 @@ ON_MOD_LOAD()
     g_AddLight = (AddLight_t)addAddr;
 
     uintptr_t aPedLight = CheckFunc("CPed::SetupLighting",
-                          Resolve("CPed::SetupLighting", "CPed_SetupLighting", { "_ZN5CPed13SetupLighting" }, true));
+                          Resolve("CPed::SetupLighting", "CPed_SetupLighting", { "_ZN4CPed13SetupLighting" }, true));
     uintptr_t aTimer    = CheckFunc("CTimer::Update",
                           Resolve("CTimer::Update",      "CTimer_Update",      { "_ZN6CTimer6UpdateE" },     true));
     uintptr_t aHead = 0;
