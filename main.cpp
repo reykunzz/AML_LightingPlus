@@ -183,8 +183,7 @@ static void ShowLightingMenu(void* data);
 
 static void QueueLightingMenu()
 {
-    if(aml && !aml->PushToJavaUIThread(ShowLightingMenu, NULL))
-        LOGE("[menu] gagal menjadwalkan dialog AML");
+    // TEMP: menu dinonaktifkan untuk tes stabilitas.
 }
 
 static void SaveFeatureBool(const char* key, bool value)
