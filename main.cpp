@@ -187,8 +187,8 @@ static void TestLightingMenuThread(void* data)
 
 static void QueueLightingMenu()
 {
-    if(aml && !aml->PushToJavaUIThread(TestLightingMenuThread, NULL))
-        LOGE("[menu] gagal menjadwalkan tes UI thread");
+    if(aml && !aml->PushToJavaUIThread(ShowLightingMenu, NULL))
+        LOGE("[menu] gagal menjadwalkan dialog AML");
 }
 
 static void SaveFeatureBool(const char* key, bool value)
