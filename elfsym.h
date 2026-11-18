@@ -136,4 +136,26 @@ namespace ElfSym
         if(matches) *matches = n;
         return first;
     }
+
+    // Daftar simbol (nama + alamat) yang memuat semua token; untuk diagnosa
+    static size_t List(std::initializer_list<const char*> tokens, bool func,
+                       char names[][160], uintptr_t* addrs, size_t maxN)
+    {
+        size_t n = 0;
+        if(!g_tab.ready) return 0;
+        for(size_t i = 0; i < g_tab.count && n < maxN; ++i)
+        {
+            const ElfW(Sym)* s = &g_tab.symtab[i];
+            if(s->st_shndx == SHN_UNDEF || s->st_value == 0 || s->st_name == 0) continue;
+            const unsigned type = (unsigned)(s->st_info & 0xF);
+            if(func && type != STT_FUNC) continue;
+            if(!func && type != STT_OBJECT) continue;
+            const char* name = g_tab.strtab + s->st_name;
+            if(!ContainsAll(name, tokens)) continue;
+            strncpy(names[n], name, 159); names[n][159] = 0;
+            addrs[n] = g_tab.base + (uintptr_t)s->st_value;
+            ++n;
+        }
+        return n;
+    }
 }

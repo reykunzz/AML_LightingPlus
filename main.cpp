@@ -19,7 +19,7 @@
 #include "ilightingplus.h"
 #include "lpdiag.h"
 
-MYMODCFG(net.lightingplus.gtasa, Lighting Plus, 1.0.1, LightingPlus)
+MYMODCFG(net.lightingplus.gtasa, Lighting Plus, 1.0.2, LightingPlus)
 NEEDGAME(com.rockstargames.gtasa)
 
 /* ------------------------------------------------------------------ */
@@ -73,7 +73,7 @@ struct Settings
     float forceDarkness  = -1.0f;   // 0..1 untuk tes di siang hari, -1 = pakai jam game
     float interiorScale  = 0.0f;
     // [Hooks] saklar per-hook, untuk mencari hook penyebab crash
-    bool  hookTimer      = true;
+    bool  hookTimer      = false;   // HookInline di CTimer::Update bikin game crash di perangkat uji -> default mati
     bool  hookPed        = true;
     bool  hookHead       = true;
     bool  hookTail       = true;
@@ -470,12 +470,11 @@ static inline uintptr_t RegThis(GlossRegisters* r)
 }
 
 // dipanggil saat game memproses lampu depan sebuah kendaraan (this = CVehicle*)
-static void OnHeadLight(GlossRegisters* regs, PHookHandle)
+static void HeadLogic(void* veh)
 {
     if(!g_set.vehicleLighting) return;
     WhereScope ws("OnHeadLight");
     Diag::Tick();
-    void* veh = (void*)RegThis(regs);
     DBGN(g_dbgHead, "[dbg] OnHeadLight veh=%p", veh);
     if(!veh) return;
 
@@ -503,11 +502,10 @@ static void OnHeadLight(GlossRegisters* regs, PHookHandle)
 }
 
 // dipanggil saat game memproses lampu belakang (this = CVehicle*)
-static void OnTailLight(GlossRegisters* regs, PHookHandle)
+static void TailLogic(void* veh)
 {
     if(!g_set.vehicleLighting) return;
     WhereScope ws("OnTailLight");
-    void* veh = (void*)RegThis(regs);
     DBGN(g_dbgTail, "[dbg] OnTailLight veh=%p", veh);
     if(!veh) return;
 
@@ -535,6 +533,20 @@ static void OnTailLight(GlossRegisters* regs, PHookHandle)
                 pos.z - fwd.z * g_set.tailDistance + 0.2f };
     const float i = (g_set.tailIntensity + brake * g_set.brakeIntensity) * k;
     SubmitLight(p, g_set.tailRadius + 2.5f * brake, 1.00f * i, 0.06f * i, 0.03f * i);
+}
+
+// hook biasa (fungsi asli tetap dipanggil). HookInline terbukti membuat game crash setelah callback pertama.
+// DoHeadLightBeam(CVehicle*, int, CMatrix&, uchar)
+SDECL_HOOKv(HeadBeam, void* self, int a, void* m, unsigned char b)
+{
+    HeadLogic(self);
+    HeadBeam(self, a, m, b);
+}
+// DoTailLightEffect(CVehicle*, int, CMatrix&, uchar, uchar, uint, uchar)
+SDECL_HOOKv(TailFx, void* self, int a, void* m, unsigned char b, unsigned char c, unsigned int d, unsigned char e)
+{
+    TailLogic(self);
+    TailFx(self, a, m, b, c, d, e);
 }
 
 static void OnTimerUpdate(GlossRegisters*, PHookHandle)
@@ -737,7 +749,7 @@ ON_MOD_LOAD()
     logger->SetTag("LightingPlus");
     const bool diagOk = Diag::Init(aml->GetAndroidDataPath(), aml->GetConfigPath(), aml->GetCurrentGame());
     Diag::Stage("load:start");
-    LOGI("LightingPlus 1.0.1 (%s) dimuat", BYBIT("32-bit", "64-bit"));
+    LOGI("LightingPlus 1.0.2 (%s) dimuat", BYBIT("32-bit", "64-bit"));
     if(!diagOk) LOGE("[diag] folder log di AndroidDataPath tidak bisa dibuat -> crash-guard tidak aktif");
     LogEnvironment();
 
@@ -817,6 +829,7 @@ ON_MOD_LOAD()
     uintptr_t aTimer    = CheckFunc("CTimer::Update",
                           Resolve("CTimer::Update",      "CTimer_Update",      { "_ZN6CTimer6UpdateE" },     true));
     uintptr_t aHead = 0;
+    if(g_set.headTrigger != 0) { LOGI("[warn] HeadTrigger=%d belum didukung pada mode hook biasa -> dipakai 0", g_set.headTrigger); g_set.headTrigger = 0; }
     switch(g_set.headTrigger)
     {
         case 1:  aHead = Resolve("Head trigger (effect)",  "CVehicle_DoHeadLightEffect", { "_ZN8CVehicle17DoHeadLightEffect" }, true); break;
@@ -826,6 +839,17 @@ ON_MOD_LOAD()
     aHead = CheckFunc("Head trigger", aHead);
     uintptr_t aTail = CheckFunc("CVehicle::DoTailLight",
                       Resolve("CVehicle::DoTailLight", "CVehicle_DoTailLightEffect", { "_ZN8CVehicle17DoTailLightEffect" }, true));
+    if(!aPedLight)
+    {
+        Diag::g_stage = "dump simbol Lighting";
+        char nm[24][160]; uintptr_t ad[24];
+        size_t cnt = ElfSym::List({ "SetupLighting" }, true, nm, ad, 24);
+        LOGI("[sym] kandidat 'SetupLighting': %lu", (unsigned long)cnt);
+        for(size_t i = 0; i < cnt; ++i) LOGI("[sym]   %s (+0x%lx)", nm[i], (unsigned long)(ad[i] - g_pGame));
+        cnt = ElfSym::List({ "Lighting" }, true, nm, ad, 24);
+        LOGI("[sym] kandidat 'Lighting' (fungsi): %lu", (unsigned long)cnt);
+        for(size_t i = 0; i < cnt; ++i) LOGI("[sym]   %s (+0x%lx)", nm[i], (unsigned long)(ad[i] - g_pGame));
+    }
     Diag::g_where = "idle";
 
     /* ---- ringkasan kemampuan ---- */
@@ -892,13 +916,15 @@ ON_MOD_LOAD()
     {
         Diag::Stage("install:Head");
         Diag::TryBegin("head");
-        bool ok = InstallInline("Head light", aHead, OnHeadLight);
+        bool ok = aml->Hook((void*)aHead, (void*)&HookOf_HeadBeam, (void**)&HeadBeam);
+        LOGI("[hook] %-22s : %s", "Head light (Hook)", ok ? "OK" : "GAGAL");
         Diag::TryEnd();
         if(ok && doTail)
         {
             Diag::Stage("install:Tail");
             Diag::TryBegin("tail");
-            InstallInline("Tail light", aTail, OnTailLight);
+            bool okT = aml->Hook((void*)aTail, (void*)&HookOf_TailFx, (void**)&TailFx);
+            LOGI("[hook] %-22s : %s", "Tail light (Hook)", okT ? "OK" : "GAGAL");
             Diag::TryEnd();
         }
         if(!ok) g_set.vehicleLighting = false;
